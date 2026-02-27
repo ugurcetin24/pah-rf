@@ -1,0 +1,20 @@
+# Virtual env
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# PyCharm
+.idea/
+
+# Data (ham veri GitHub'a gitmesin)
+data/raw/*.csv
+
+# Model dosyaları
+models/
+reports/
+
+# OS
+.DS_Store
+Thumbs.db
