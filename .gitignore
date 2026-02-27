@@ -10,6 +10,7 @@ __pycache__/
 
 # Data (ham veri GitHub'a gitmesin)
 data/raw/*.csv
+!data/raw/pah_egitim_seti_temiz_final.csv
 
 # Model dosyaları
 models/
