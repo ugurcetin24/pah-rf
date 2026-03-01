@@ -8,26 +8,27 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
+    confusion_matrix,
     f1_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 
 
 def find_best_threshold(y_true: np.ndarray, y_proba: np.ndarray) -> tuple[float, float]:
     """
-    Amaç: 0/1 sınıflaması için en iyi eşik (threshold) değerini bulmak.
+    Amaç: En iyi threshold'u (eşik) F1 skoruna göre seçmek.
 
     Neyi neden yapıyoruz?
-    - RandomForest 'predict_proba' ile 0-1 arası olasılık üretir.
-    - Varsayılan eşik 0.50'dir ama her veri seti için ideal olmayabilir.
-    - Biz burada farklı eşikleri deneyip F1 skorunu maksimize eden eşiği seçiyoruz.
+    - Model olasılık (0-1) üretir: predict_proba.
+    - Varsayılan threshold=0.50 her zaman optimal değildir.
+    - F1'i maksimize eden threshold'u bulup, daha dengeli performans alırız.
 
     Dönüş:
-    - best_thr: F1'i en yüksek yapan eşik
-    - best_f1: o eşiğe karşılık gelen F1 skoru
+    - best_thr: en iyi eşik
+    - best_f1: bu eşikteki F1
     """
-    thresholds = np.linspace(0.05, 0.95, 91)  # 0.05 - 0.95 arası tarama
+    thresholds = np.linspace(0.05, 0.95, 91)
     best_thr = 0.50
     best_f1 = -1.0
 
@@ -43,73 +44,125 @@ def find_best_threshold(y_true: np.ndarray, y_proba: np.ndarray) -> tuple[float,
 
 def main() -> None:
     print("Ensemble (Topluluk) Modeli Eğitiliyor...\n")
+    print("Stratified 5-Fold Cross Validation Başlıyor...\n")
 
-    # 1) Dosya yolu (neden pathlib?)
-    # - Script'i nereden çalıştırırsan çalıştır, path bozulmasın diye.
-    BASE_DIR = Path(__file__).resolve().parent.parent  # src/.. => proje root
+    # 1) Güvenli dosya yolu (nereden çalıştırırsan çalıştır bozulmasın)
+    BASE_DIR = Path(__file__).resolve().parent.parent
     file_path = BASE_DIR / "data" / "raw" / "pah_balanced_58x58_anonymized.csv"
 
     # 2) Veri yükle
     df = pd.read_csv(file_path)
 
-    # 3) Target kontrolü
+    # 3) Target kontrol
     if "target" not in df.columns:
         raise ValueError("CSV içinde 'target' kolonu bulunamadı. Kolon adını kontrol et.")
 
-    # 4) X / y ayır
-    # Neyi neden yapıyoruz?
-    # - 'target' dışındaki tüm kolonlar feature (X)
-    # - target: 0 benign, 1 patojenik (y)
     X = df.drop(columns=["target"])
-    y = df["target"].astype(int)
+    y = df["target"].astype(int).to_numpy()
 
-    # 5) Train / Test split (stratify neden?)
-    # - Sınıf oranı korunur (benign/patojenik dengesi bozulmasın)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.20,
-        random_state=42,
-        stratify=y,
-    )
+    # 4) CV ayarları
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    # 6) Model
+    # 5) Metrikleri biriktireceğiz
+    fold_metrics = []
+    all_y_true = []
+    all_y_pred = []
+
+    # 6) Fold döngüsü
+    for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y), start=1):
+        X_train = X.iloc[train_idx]
+        y_train = y[train_idx]
+        X_test = X.iloc[test_idx]
+        y_test = y[test_idx]
+
+        # Model (her fold için sıfırdan eğitiyoruz)
+        rf = RandomForestClassifier(
+            n_estimators=600,
+            random_state=42,
+            class_weight="balanced",
+            n_jobs=-1,
+        )
+        rf.fit(X_train, y_train)
+
+        # Olasılık
+        y_proba = rf.predict_proba(X_test)[:, 1]
+
+        # Fold için optimal threshold (F1 maks)
+        best_thr, best_f1 = find_best_threshold(y_test, y_proba)
+
+        # Fold tahminleri
+        y_pred = (y_proba >= best_thr).astype(int)
+
+        # Fold metrikleri
+        acc = accuracy_score(y_test, y_pred)
+        roc_auc = roc_auc_score(y_test, y_proba)
+
+        cm = confusion_matrix(y_test, y_pred)
+
+        fold_metrics.append(
+            {
+                "fold": fold_idx,
+                "accuracy": acc,
+                "f1": best_f1,         # bu fold'da threshold taramasıyla bulunan en iyi F1
+                "roc_auc": roc_auc,
+                "threshold": best_thr,
+                "tn": int(cm[0, 0]),
+                "fp": int(cm[0, 1]),
+                "fn": int(cm[1, 0]),
+                "tp": int(cm[1, 1]),
+            }
+        )
+
+        all_y_true.extend(y_test.tolist())
+        all_y_pred.extend(y_pred.tolist())
+
+        # Fold çıktısı (jüriye gösterilebilir)
+        print("==============================================")
+        print(f"FOLD {fold_idx}/5 SONUÇLARI")
+        print(f"Accuracy:  {acc*100:.2f}%")
+        print(f"ROC-AUC:   {roc_auc:.3f}")
+        print(f"Best F1:   {best_f1:.2f}")
+        print(f"Threshold: {best_thr:.2f}")
+        print(f"Confusion Matrix (TN FP / FN TP): {cm.tolist()}")
+        print("==============================================\n")
+
+    # 7) Özet tablo
+    metrics_df = pd.DataFrame(fold_metrics)
+
+    acc_mean = metrics_df["accuracy"].mean()
+    acc_std = metrics_df["accuracy"].std(ddof=1)
+
+    f1_mean = metrics_df["f1"].mean()
+    f1_std = metrics_df["f1"].std(ddof=1)
+
+    auc_mean = metrics_df["roc_auc"].mean()
+    auc_std = metrics_df["roc_auc"].std(ddof=1)
+
+    thr_mean = metrics_df["threshold"].mean()
+    thr_std = metrics_df["threshold"].std(ddof=1)
+
+    print("##############################################")
+    print("5-FOLD CV ÖZET (ORTALAMA ± STD)")
+    print(f"Accuracy:  {acc_mean*100:.2f}% ± {acc_std*100:.2f}%")
+    print(f"F1:        {f1_mean:.2f} ± {f1_std:.2f}")
+    print(f"ROC-AUC:   {auc_mean:.3f} ± {auc_std:.3f}")
+    print(f"Threshold: {thr_mean:.2f} ± {thr_std:.2f}")
+    print("##############################################\n")
+
+    # 8) Tüm fold tahminlerinden global rapor
     # Neyi neden yapıyoruz?
-    # - n_estimators: ağaç sayısı yüksek olsun => daha stabil
-    # - class_weight: dengesizlik olursa otomatik dengeye yardımcı
-    # - n_jobs=-1: tüm çekirdekleri kullan => hız
-    rf = RandomForestClassifier(
-        n_estimators=600,
-        random_state=42,
-        class_weight="balanced",
-        n_jobs=-1,
-    )
+    # - Her örnek bir fold’da test oldu.
+    # - Bu yüzden burada ürettiğimiz classification_report, "CV üzerinden genel performans" gibi düşünülebilir.
+    print("GLOBAL (TÜM FOLD'LARIN TEST TAHMİNLERİ) SINIFLANDIRMA RAPORU:\n")
+    print(classification_report(np.array(all_y_true), np.array(all_y_pred), digits=2))
 
-    rf.fit(X_train, y_train)
+    # 9) İstersen raporu dosyaya da yazalım (jüri için kanıt)
+    reports_dir = BASE_DIR / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    metrics_csv_path = reports_dir / "cv_metrics_rf.csv"
+    metrics_df.to_csv(metrics_csv_path, index=False)
 
-    # 7) Olasılık tahmini
-    y_proba = rf.predict_proba(X_test)[:, 1]
-
-    # 8) Optimal threshold bul
-    best_thr, best_f1 = find_best_threshold(y_test.to_numpy(), y_proba)
-
-    # 9) Threshold ile final sınıf tahmini
-    y_pred = (y_proba >= best_thr).astype(int)
-
-    # 10) Metrikler
-    acc = accuracy_score(y_test, y_pred) * 100.0
-    roc_auc = roc_auc_score(y_test, y_proba)
-
-    # 11) Terminal çıktısı (CatBoost ekranı gibi)
-    print("==============================================")
-    print(f"ENSEMBLE FINAL BAŞARISI: %{acc:.2f}")
-    print(f"OPTIMAL EŞİK DEĞERİ: {best_thr:.2f}")
-    print(f"BEST F1 (THRESHOLD TARAMA): {best_f1:.2f}")
-    print(f"ROC-AUC: {roc_auc:.3f}")
-    print("==============================================\n")
-
-    print("Final Sınıflandırma Raporu:\n")
-    print(classification_report(y_test, y_pred, digits=2))
+    print(f"\n[OK] Fold metrikleri kaydedildi: {metrics_csv_path}")
 
 
 if __name__ == "__main__":
