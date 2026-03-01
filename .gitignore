@@ -19,3 +19,8 @@ reports/
 # OS
 .DS_Store
 Thumbs.db
+
+# data
+data/raw/*.csv
+data/raw/*.tsv
+data/raw/*.txt
